@@ -192,6 +192,7 @@ async def async_serialize(
     context=TS_CONTEXT,
     primary_host: Optional[int] = 0,
     replica_id: int = 0,
+    transaction: Optional[ts.Transaction] = None,
 ):
   """Serialize an array using TensorStore.
 
@@ -205,8 +206,10 @@ async def async_serialize(
     primary_host: Primary host, which indicates the host that will be treated as
       the "leader". If None, all hosts are treated as the primary. DO NOT USE
       unless you are sure you know what you are doing.
-    replica_id: Allows overriding the shard replica id that will be saved.
-      DO NOT USE unless you are sure you know what you are doing.
+    replica_id: Allows overriding the shard replica id that will be saved. DO
+      NOT USE unless you are sure you know what you are doing.
+    transaction: TensorStore transaction to use for opening and writing the
+      array.  If not specified, a non-transactional write will be used.
   """
   if (isinstance(arr_inp, array.ArrayImpl) and jax.process_count() > 1 and
       arr_inp.is_fully_addressable):
@@ -233,6 +236,7 @@ async def async_serialize(
         create=True,
         open=True,
         context=context,
+        transaction=transaction,
     )
     # Asynchronous case.
     if commit_future is not None:
@@ -252,11 +256,22 @@ async def async_serialize(
       open=True,
       assume_metadata=True,
       context=context,
+      transaction=transaction,
   )
 
   async def _write_array(shard):
     if shard.replica_id == replica_id:
-      write_future = t[shard.index].write(shard.data)
+      write_future = t[shard.index].write(
+          shard.data,
+          # Avoid additional copy of input array into the TensorStore chunk
+          # cache.  If `arr_inp` is a jax.Array, the result of converting
+          # it to a NumPy array, as is done internally by TensorStore, is
+          # guaranteed to be immutable and therefore it is safe to retain a
+          # reference indefinitely.
+          can_reference_source_data_indefinitely=isinstance(
+              arr_inp, array.ArrayImpl
+          ),
+      )
       if commit_future is not None:
         assert isinstance(commit_future, list)
         commit_future.append(write_future.commit)

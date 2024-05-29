@@ -107,6 +107,41 @@ class CheckpointTest(jtu.JaxTestCase):
     self.assertGreater(peak, 30_000_000)
     tm.stop()
 
+  def test_memory_consumption_for_save(self):
+    global_mesh = jtu.create_global_mesh((1, 1), ('x', 'y'))
+    inp_shape = (16 * 1024, 16 * 1024)
+    pspec = P('x', 'y')
+    num = math.prod(inp_shape)
+    sharding = NamedSharding(global_mesh, pspec)
+    src = jnp.arange(num, dtype=np.int32).reshape(inp_shape)
+    inp = array.make_array_from_callback(
+        inp_shape, sharding, lambda idx: src[idx]
+    )
+    ckpt_dir = pathlib.Path(self.create_tempdir('memprofsave').full_path)
+    tspec = serialization.get_tensorstore_spec(str(ckpt_dir))
+    tspec['metadata'] = {
+        'shape': inp.shape,
+        'compressor': None,
+        'chunks': inp.shape,
+    }
+
+    is_cpu = jtu.test_device_matches(['cpu'])
+    tm.start()
+    try:
+      manager = serialization.GlobalAsyncCheckpointManager()
+      manager.serialize(
+          [inp],
+          [tspec],
+          on_commit_callback=partial(
+              self._on_commit_callback, ckpt_dir, ckpt_dir
+          ),
+      )
+      manager.wait_until_finished()
+      unused_current, peak = tm.get_traced_memory()
+      self.assertLess(peak, src.nbytes * (1 * (not is_cpu) + 0.5))
+    finally:
+      tm.stop()
+
   def test_checkpointing_with_path_variant(self):
     global_mesh = jtu.create_global_mesh((4, 2), ('x', 'y'))
     inp_shape = (8, 2)

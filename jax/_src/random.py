@@ -403,7 +403,7 @@ def _uniform(key, shape, dtype, minval, maxval) -> Array:
   finfo = jnp.finfo(dtype)
   nbits, nmant = finfo.bits, finfo.nmant
 
-  if nbits not in (16, 32, 64):
+  if nbits not in (8, 16, 32, 64):
     raise TypeError(f"uniform only accepts 16-, 32-, or 64-bit dtypes, got {dtype}.")
 
   rng_bits = nbits
@@ -2352,7 +2352,6 @@ def _triangular(key, left, mode, right, shape, dtype) -> Array:
   out2 = right - lax.sqrt((1 - u) * (right - left) * (right - mode))
   tri = lax.select(u < fc, out1, out2)
   return tri
-
 
 
 def lognormal(key: KeyArrayLike,

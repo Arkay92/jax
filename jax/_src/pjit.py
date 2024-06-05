@@ -171,7 +171,7 @@ class PjitInfo(NamedTuple):
 
 
 def _python_pjit_helper(jit_info, *args, **kwargs):
-  (args_flat, _, params, _, out_tree, _, arg_names,
+  (args_flat, params, _, out_tree, _, arg_names,
    attrs_tracked) = _infer_params(jit_info, args, kwargs)
 
   for arg in args_flat:
@@ -480,7 +480,7 @@ def _make_jit_wrapper(jit_info: PjitInfo):
     lowering_parameters = kwargs.pop(
         '_experimental_lowering_parameters', mlir.LoweringParameters())
 
-    (args_flat, flat_global_in_avals, params, in_tree, out_tree,
+    (args_flat, params, in_tree, out_tree,
      donated_invars, arg_names, _) = _infer_params(jit_info, args, kwargs)
     try:
       lowering = _resolve_and_lower(
@@ -496,22 +496,39 @@ def _make_jit_wrapper(jit_info: PjitInfo):
       raise ValueError(msg) from None
 
     donate_argnums = tuple(i for i, d in enumerate(donated_invars) if d)
+    jaxpr = params["jaxpr"]
     return stages.Lowered.from_flat_info(
-        lowering, in_tree, flat_global_in_avals, donate_argnums,
-        out_tree, fun_name=params["name"], jaxpr=params["jaxpr"])
+        lowering, in_tree, jaxpr.in_avals, donate_argnums, out_tree)
 
   @api_boundary
   def eval_shape(*args, **kwargs):
-    _, _, params, _, out_tree, _, _, _ = _infer_params(jit_info, args, kwargs)
+    _, params, _, out_tree, _, _, _ = _infer_params(jit_info, args, kwargs)
     out_s = [None if is_unspecified(s) else s for s in params['out_shardings']]
     # TODO(yashkatariya): Add `Layout` to SDS.
     out = [api.ShapeDtypeStruct(x.shape, x.dtype, x.named_shape, sharding=s)
            for x, s in zip(params['jaxpr'].out_avals, out_s)]
     return tree_unflatten(out_tree, out)
 
+  @api_boundary
+  def specialize(*args, **kwargs) -> stages.Specialized:
+    lowering_parameters = kwargs.pop(
+        '_experimental_lowering_parameters', mlir.LoweringParameters())
+
+    args_flat, params, in_tree, out_tree, donated_invars, _, _ = _infer_params(
+        jit_info, args, kwargs)
+
+    donate_argnums = tuple(i for i, d in enumerate(donated_invars) if d)
+    jaxpr = params['jaxpr']
+    args_info = stages.make_args_info(in_tree, jaxpr.in_avals, donate_argnums)
+    lower_callable = partial(_resolve_and_lower, args_flat, **params,
+                             lowering_parameters=lowering_parameters)
+    return stages.Specialized(jaxpr, args_info, params["name"], out_tree,
+                              lower_callable)
+
   wrapped = _cpp_pjit(jit_info)
   wrapped.lower = lower
   wrapped.eval_shape = eval_shape
+  wrapped.specialize = specialize
   return wrapped
 
 
@@ -657,7 +674,7 @@ def _infer_params(jit_info, args, kwargs):
       keep_unused=keep_unused,
       inline=inline,
   )
-  return (consts + args_flat, in_type, params, in_tree, out_tree(),
+  return (consts + args_flat, params, in_tree, out_tree(),
           donated_invars, dbg.arg_names if dbg else None, attrs_tracked)
 
 def _extract_implicit_args(
@@ -704,6 +721,9 @@ class JitWrapped(stages.Wrapped):
 
   def eval_shape(self, *args, **kwargs):
     """See ``jax.eval_shape``."""
+    raise NotImplementedError
+
+  def specialize(self, *args, **kwargs) -> stages.Specialized:
     raise NotImplementedError
 
 

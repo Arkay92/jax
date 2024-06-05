@@ -617,7 +617,7 @@ def xmap(fun: Callable,
         '_experimental_lowering_platform', mlir.LoweringParameters())
     fun_flat, args_flat, params, in_tree, out_tree = infer_params(*args)
     avals_flat = [shaped_abstractify(arg) for arg in args_flat]
-    computation, jaxpr = make_xmap_callable(
+    computation, _ = make_xmap_callable(
         fun_flat, params['name'], params['in_axes'], params['out_axes_thunk'],
         params['donated_invars'], params['global_axis_sizes'], params['axis_resources'],
         params['resource_env'], params['backend'], params['spmd_in_axes'],
@@ -627,10 +627,31 @@ def xmap(fun: Callable,
     in_tree = treedef_tuple([in_tree, tree_flatten({})[1]])
     in_avals = in_tree.unflatten(avals_flat)
     return stages.Lowered.from_flat_info(
-        computation, in_tree, in_avals, donate_argnums, out_tree(),
-        no_kwargs=True, fun_name=params['name'], jaxpr=jaxpr)
+        computation, in_tree, in_avals, donate_argnums, out_tree())
+
+  @decorate_serial
+  def specialize(*args, **kwargs) -> stages.Specialized:
+    lowering_parameters = kwargs.pop(
+        '_experimental_lowering_platform', mlir.LoweringParameters())
+    fun_flat, args_flat, params, in_tree, out_tree = infer_params(*args)
+    avals_flat = [shaped_abstractify(arg) for arg in args_flat]
+    # We are lowering just to get the jaxpr and this is bad. But xmap is going
+    # to be deleted soon, so no harm.
+    lower_callable = partial(
+        make_xmap_callable, fun_flat, params['name'], params['in_axes'],
+        params['out_axes_thunk'], params['donated_invars'],
+        params['global_axis_sizes'], params['axis_resources'],
+        params['resource_env'], params['backend'], params['spmd_in_axes'],
+        params['spmd_out_axes_thunk'],
+        lowering_parameters, *avals_flat)
+    _, jaxpr = lower_callable()
+
+    args_info = stages.make_args_info(in_tree, jaxpr.in_avals, donate_argnums)
+    return stages.Specialized(jaxpr, args_info, params['name'], out_tree,
+                              lower_callable)
 
   fun_mapped.lower = lower
+  fun_mapped.specialize = specialize
   return type_cast(stages.Wrapped, fun_mapped)
 
 def xmap_impl(fun: lu.WrappedFun, *args, name, in_axes, out_axes_thunk, donated_invars,

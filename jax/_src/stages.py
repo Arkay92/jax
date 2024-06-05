@@ -387,7 +387,7 @@ class ArgInfo:
 class OutInfo:
   shape: tuple[int, ...]
   dtype: jax.typing.DTypeLike
-  sharding: jax.sharding.Sharding
+  sharding: jax.sharding.Sharding | None = None
 
 
 class Stage:
@@ -423,6 +423,27 @@ class CompiledCallParams(NamedTuple):
   no_kwargs: bool
   in_tree: tree_util.PyTreeDef
   out_tree: tree_util.PyTreeDef
+
+
+class Specialized(Stage):
+  __slots__ = ["jaxpr", "args_info", "fun_name", "_out_tree", "_lower_callable"]
+
+  def __init__(self, jaxpr: core.ClosedJaxpr, args_info, fun_name, out_tree,
+               lower_callable):
+    self.jaxpr = jaxpr
+    self.args_info = args_info
+    self.fun_name = fun_name
+    self._out_tree = out_tree
+    self._lower_callable = lower_callable
+
+  @property
+  def out_info(self):
+    return self._out_tree.unflatten(
+        [OutInfo(o.shape, o.dtype) for o in self.jaxpr.out_avals])
+
+  def lower(self):
+    lowering = self._lower_callable()
+    return Lowered(lowering, self.args_info, self._out_tree)
 
 
 class Compiled(Stage):
@@ -622,30 +643,23 @@ class Lowered(Stage):
   querying properties of lowered computations across JAX's various
   lowering paths (:func:`~jax.jit`, :func:`~jax.pmap`, etc.).
   """
-  __slots__ = ["_lowering", "args_info", "out_tree", "_no_kwargs", "_fun_name", "_jaxpr"]
+  __slots__ = ["_lowering", "args_info", "out_tree", "_no_kwargs"]
   _lowering: XlaLowering
   args_info: Any                # PyTree of ArgInfo
   out_tree: tree_util.PyTreeDef
   _no_kwargs: bool
-  _fun_name: str
-  _jaxpr: core.ClosedJaxpr | None  # Can be None when this class is constructed
-                                   # outside of JAX core.
 
   def __init__(
       self,
       lowering: XlaLowering,
       args_info,  # PyTree of ArgInfo
       out_tree: tree_util.PyTreeDef,
-      no_kwargs: bool = False,
-      fun_name: str = "<unnamed function>",
-      jaxpr: core.ClosedJaxpr | None = None):
+      no_kwargs: bool = False):
 
     self._lowering = lowering
     self.args_info = args_info
     self.out_tree = out_tree
     self._no_kwargs = no_kwargs
-    self._fun_name = fun_name
-    self._jaxpr = jaxpr
 
   @classmethod
   def from_flat_info(cls,
@@ -654,9 +668,7 @@ class Lowered(Stage):
                      in_avals,
                      donate_argnums: tuple[int, ...],
                      out_tree: tree_util.PyTreeDef,
-                     no_kwargs: bool = False,
-                     fun_name: str = "<unnamed function>",
-                     jaxpr: core.ClosedJaxpr | None = None):
+                     no_kwargs: bool = False):
     """Initialize from flat info (``in_avals`` etc.) and an input PyTreeDef.
 
     Args:
@@ -665,15 +677,12 @@ class Lowered(Stage):
       no_kwargs: If ``True`` the transformation, and the
         ``Compiled`` returned from this object will not support keyword
         arguments (an error will be raised if some are provided).
-      fun_name: the name of the lowered function.
-      jaxpr: the Jaxpr of the lowered function. The value `None` is for
-        backwards compatibility, and is used only outside JAX core.
     """
     return cls(
         lowering,
         make_args_info(in_tree, in_avals, donate_argnums),
         out_tree,
-        no_kwargs=no_kwargs, fun_name=fun_name, jaxpr=jaxpr)
+        no_kwargs=no_kwargs)
 
   @property
   def out_info(self):  # PyTree of OutInfo

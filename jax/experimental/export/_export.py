@@ -433,15 +433,15 @@ def export(fun_jax: Callable,
   """
 
   def do_export(*args_specs, **kwargs_specs) -> Exported:
-    if not hasattr(fun_jax, "lower"):
+    if hasattr(fun_jax, "lower") and hasattr(fun_jax, "specialize"):
+      # If we have a pjit or pmap already we do not wrap with another, and we
+      # allow shardings.
+      wrapped_fun_jax = fun_jax  # type: ignore
+    else:
       # We support convert(pjit(f_jax)) and convert(jit(f_jax)) but also
       # convert(f_jax), in which case a "jit" is implied. In that case we raise
       # an error if the lowered function contains non-replicated sharding annotations.
       wrapped_fun_jax = jax.jit(fun_jax)
-    else:
-      # If we have a pjit or pmap already we do not wrap with another, and we
-      # allow shardings.
-      wrapped_fun_jax = fun_jax  # type: ignore
 
     if lowering_platforms is not None:
       actual_lowering_platforms = tuple(lowering_platforms)
@@ -464,18 +464,21 @@ def export(fun_jax: Callable,
               self_descr=f"current (from {shape_poly.args_kwargs_path_to_str(symbolic_scope[1])}) ",
               other_descr=shape_poly.args_kwargs_path_to_str(k_path))
 
-    lowered = wrapped_fun_jax.lower(
+    specialized = wrapped_fun_jax.specialize(
         *args_specs, **kwargs_specs,
         _experimental_lowering_parameters=mlir.LoweringParameters(
           platforms=actual_lowering_platforms,
         ))
+    lowered = specialized.lower()
     return _export_lowered(
-        lowered, disabled_checks=disabled_checks,
+        lowered, specialized.jaxpr, specialized.fun_name,
+        disabled_checks=disabled_checks,
         _device_assignment_for_internal_jax2tf_use_only=_device_assignment_for_internal_jax2tf_use_only)
   return do_export
 
 def _export_lowered(
     lowered: stages.Lowered,
+    jaxpr: core.ClosedJaxpr, fun_name: str,
     disabled_checks: Sequence[DisabledSafetyCheck] = (),
     _device_assignment_for_internal_jax2tf_use_only = None,
   ) -> Exported:
@@ -562,8 +565,8 @@ def _export_lowered(
   def _get_exported_vjp(exp_primal: Exported) -> Exported:
     # Turn the primal jaxpr into a function, in preparation for exporting
     # the VJP. Note that jaxpr_as_fun produces a function with flat arguments
-    assert(lowered._jaxpr is not None)  # None only when the lowered was created outside JAX
-    fun_jax = core.jaxpr_as_fun(lowered._jaxpr)
+    assert(jaxpr is not None)  # None only when the lowered was created outside JAX
+    fun_jax = core.jaxpr_as_fun(jaxpr)
 
     fun_vjp_jax, vjp_in_avals = _get_vjp_fun(fun_jax,
                                              in_tree=exp_primal.in_tree,
@@ -579,7 +582,7 @@ def _export_lowered(
                   disabled_checks=exp_primal.disabled_safety_checks)(*vjp_in_avals)
 
   return Exported(
-      fun_name=lowered._fun_name,
+      fun_name=fun_name,
       in_tree=lowered.in_tree,
       out_tree=lowered.out_tree,
       in_avals=tuple(args_avals_flat),
